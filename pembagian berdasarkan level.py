@@ -59,12 +59,12 @@ def get_member_pembagian(member_queryset, transactions):
 
 
 def get_transaction_statistic(transactions, key_prefix: str = "") -> dict:
-    aggregates = transactions.aggregate(
-        Sum('value'), Count('id'), Sum('items__quantity'))
+    aggregates = transactions.aggregate(Sum('value'), Count('id'))
+    aggregates2 = transactions.aggregate(Sum('items__quantity'))
 
     revenue = aggregates.get('value__sum') or 0
     transaction_count = aggregates.get('id__count') or 0
-    item_count = aggregates.get('items__quantity__sum') or 0
+    item_count = aggregates2.get('items__quantity__sum') or 0
     atv = revenue/transaction_count
     upt = item_count/transaction_count
 
