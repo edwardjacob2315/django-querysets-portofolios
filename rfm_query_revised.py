@@ -1,14 +1,9 @@
-import csv
 from datetime import date
 import math
+import pandas as pd
 
-
-from django.utils import timezone
-# from app.models import User  # replace with your actual import
-from stamps.core.utils import prepare_datetime_range
-
-# INPUT_PATH = '/tmp/test_data_exc.csv'
-# OUTPUT_PATH = f'/tmp/rfm_transaction_quarter_2023-levisQ1{timezone.localdate()}.csv'
+from lsco_reporting_server.core.utils import prepare_datetime_range
+from lsco_reporting_server.core.calendar_fiscal import get_quarter
 
 # Tiers
 TIER_SPENDING_1 = 1000000
@@ -16,31 +11,50 @@ TIER_SPENDING_2 = 2000000
 TIER_FREQUENCY_1 = 1
 TIER_FREQUENCY_2 = 4
 
-# Column names
 
-# Quarter dates
-START_QUARTER_DATE = date(2022, 8, 29)
-END_QUARTER_DATE = date(2022, 8, 30)
+# # Quarter dates This Year
+START_QUARTER_DATE = date(2022, 5, 30)
+END_QUARTER_DATE = date(2023, 5, 28)
+REAL_START_QUARTER_DATE = date(2023, 2, 27)
 
-def get_spending_classification(sum_values: int, count_values: int) -> tuple:
-    ATV = sum_values/count_values
+# Quarter dates Last Year
+# START_QUARTER_DATE = date(2021, 5, 31)
+# END_QUARTER_DATE = date(2022, 5, 29)
+# REAL_START_QUARTER_DATE = date(2022, 2, 28)
 
-    if ATV < TIER_SPENDING_1:
+
+retailers = ['AMP', 'LAU', 'KCS', 'SCU', 'MMR', 'MDS', 'PL', 'Ecommerce']
+merchant = StampsMerchant.objects.get(id=2)
+storetagvalue = set(StampsStoreTagValue.objects.filter(group__merchant=merchant)\
+                                     .filter(group__name='Retailer')\
+                                     .filter(name__in=retailers)\
+                                     .values_list('stores', flat=True))
+
+store_tag_value_dict = {}
+for store in StampsStore.objects.filter(id__in=storetagvalue):
+    tag_value_names = store.tag_values.values_list('name', flat=True)
+    store_tag_value_dict[store.id] = {'retailer': list(tag_value_names)}
+
+for key, value in store_tag_value_dict.items():
+    shortest_retailer = min(value['retailer'], key=len)
+    store_tag_value_dict[key]['retailer'] = shortest_retailer
+
+store_list = [{'store_id': k, **v} for k, v in store_tag_value_dict.items()]
+store_retailer_df = pd.DataFrame(store_list)
+
+
+
+
+def get_spending_classification(atv: int) -> tuple:
+
+    if atv < TIER_SPENDING_1:
         spending_group = 'LS'
-    elif ATV >= TIER_SPENDING_1 and ATV <= TIER_SPENDING_2:
+    elif atv >= TIER_SPENDING_1 and atv <= TIER_SPENDING_2:
         spending_group = 'MS'
     else:
         spending_group = 'HS'
 
     return spending_group
-
-# def get_spending_classification(sum_values: int, count_values: int) -> tuple:
-#     ATV = sum_values/count_values
-#     if ATV < TIER_SPENDING_1:
-#         return 'LS'
-#     elif ATV <= TIER_SPENDING_2:
-#         return 'MS'
-#     return 'HS'
 
 
 def get_frequency_classification(count_values: int) -> str:
@@ -54,17 +68,10 @@ def get_frequency_classification(count_values: int) -> str:
 
     return frequency_group
 
-# def get_frequency_classification(count_values: int) -> str:
-#     if count_values <= TIER_FREQUENCY_1:
-#         return "LF"
-#     elif count_values <= TIER_FREQUENCY_2:
-#         return "MF"
-#     return "HF"
-
 
 def get_user_mapping(transaction_dict):
     user_ids = set(transaction_dict.values_list('user_id', flat = True))
-    users = User.objects.filter(id__in=user_ids).select_related('profile')\
+    users =StampsUser.objects.filter(id__in=user_ids).select_related('profile')\
                         .only('date_joined','profile__gender','profile__birthday')
 
     user_mapping = {}
@@ -79,18 +86,25 @@ def get_user_mapping(transaction_dict):
 
 def get_transaction(START_QUARTER_DATE, END_QUARTER_DATE):
 
-    transactions_dict = Transaction.objects.exclude(status=Transaction.STATUS.canceled)\
-                                           .exclude(user_id=None)\
-                                           .filter(created__range=prepare_datetime_range(START_QUARTER_DATE, END_QUARTER_DATE))\
-                                           .values('user_id')\
-                                           .annotate(count_trx=Count('id'), sum_value=Sum('value'))\
-                                           .order_by('user_id')
+    transactions_qs = StampsTransaction.objects.exclude(status=StampsTransaction.STATUS.canceled)\
+                                              .filter(created__range=prepare_datetime_range(START_QUARTER_DATE, END_QUARTER_DATE))\
 
-    return transactions_dict
+    transactions_qs_member = transactions_qs.exclude(user_id=None)\
+
+    transactions_dict = transactions_qs_member.values('user_id')\
+                                       .annotate(count_trx=Count('id'), sum_value=Sum('value'), atv=Avg('value'))\
+                                       .order_by('user_id')
+
+    transactions_dict_retailer = pd.DataFrame(transactions_qs.values('id','user_id','store_id','value', 'from_returning_user'))
 
 
-def get_rfm_data(user_id, transactions_dict, user_mapping, START_QUARTER_DATE=START_QUARTER_DATE, END_QUARTER_DATE=END_QUARTER_DATE):
+    return transactions_qs, transactions_dict, transactions_dict_retailer
+
+
+def get_rfm_data(user_id, transactions_dict, user_mapping, START_QUARTER_DATE=REAL_START_QUARTER_DATE, END_QUARTER_DATE=END_QUARTER_DATE):
+
     transaction = transactions_dict.get(user_id=user_id)
+    atv_value = transaction['atv']
     sum_values = transaction['sum_value']
     count_values = transaction['count_trx']
     user_data = user_mapping.get(user_id)
@@ -111,9 +125,9 @@ def get_rfm_data(user_id, transactions_dict, user_mapping, START_QUARTER_DATE=ST
         'user_id': user_id,
         'transaction_count': count_values,
         'revenue': sum_values,
-        'atv': round(sum_values / count_values, 2),
-        'spending_group': get_spending_classification(sum_values, count_values),
+        'atv': atv_value,
         'frequency_group': get_frequency_classification(count_values),
+        'spending_group': get_spending_classification(atv_value),
         'gender': user_data['user_gender'],
         'current_age': current_age,
         'age_cat': age_cat,
@@ -122,12 +136,19 @@ def get_rfm_data(user_id, transactions_dict, user_mapping, START_QUARTER_DATE=ST
         }
 
 
-transaction_dict = get_transaction(START_QUARTER_DATE, END_QUARTER_DATE)
-user_mapping = get_user_mapping(transaction_dict)
+transactions_qs, transactions_dict, transactions_dict_retailer = get_transaction(START_QUARTER_DATE, END_QUARTER_DATE)
+user_mapping = get_user_mapping(transactions_dict)
 
 
 rfm_dict = {}
 
 for uid in user_mapping.keys():
-    data = get_rfm_data(uid, transaction_dict, user_mapping)
+    data = get_rfm_data(uid, transactions_dict, user_mapping)
     rfm_dict[uid] = data
+
+df_rfm = pd.DataFrame.from_dict(rfm_dict, orient='index')
+transactions_dict_retailer = pd.merge(transactions_dict_retailer, store_retailer_df, how = 'left', on='store_id')
+trx_dict_df = pd.merge(transactions_dict_retailer, df_rfm[['user_id', 'frequency_group', 'spending_group']], how = 'left', on='user_id')
+
+# df_rfm.to_csv(f'/home/bintang/df_rfm_{START_QUARTER_DATE}-{END_QUARTER_DATE}.csv', index=False)
+trx_dict_df.to_csv(f'/home/bintang/trx_dict_df{START_QUARTER_DATE}-{END_QUARTER_DATE}.csv', index=False)
